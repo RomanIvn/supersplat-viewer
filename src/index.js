@@ -1,5 +1,5 @@
 import '@playcanvas/web-components';
-import { shaderChunks, Asset, BoundingBox, Color, EventHandler, Mat4, MiniStats, Vec3, Quat } from 'playcanvas';
+import { shaderChunks, Asset, BoundingBox, Color, EventHandler, Mat4, MiniStats, Vec3, Quat, Entity, BoundingSphere } from 'playcanvas';
 import { XrControllers } from 'playcanvas/scripts/esm/xr-controllers.mjs';
 import { XrNavigation } from 'playcanvas/scripts/esm/xr-navigation.mjs';
 
@@ -17,12 +17,14 @@ import { Pose } from './pose.js';
 const url = new URL(location.href);
 
 // support overriding parameters by query param
-const paramOverrides = {};
-if (url.searchParams.has('noui')) paramOverrides.noui = true;
-if (url.searchParams.has('noanim')) paramOverrides.noanim = true;
+const paramOverrides = {
+    noanim: true
+};
+ 
 if (url.searchParams.has('poster')) paramOverrides.posterUrl = url.searchParams.get('poster');
 if (url.searchParams.has('skybox')) paramOverrides.skyboxUrl = url.searchParams.get('skybox');
 if (url.searchParams.has('ministats')) paramOverrides.ministats = true;
+if (url.searchParams.has('noui')) paramOverrides.noui = true;
 
 // get experience parameters
 const params = {
@@ -71,10 +73,39 @@ void main(void) {
 `;
 
 // render skybox as plain equirect
+shaderChunks.gsplatCenterVS = /* glsl */ `
+uniform mat4 matrix_model;
+uniform mat4 matrix_view;
+uniform mat4 matrix_projection;
+
+// project the model space gaussian center to view and clip space
+bool initCenter(vec3 modelCenter, out SplatCenter center) {
+    mat4 modelView = matrix_view * matrix_model;
+    vec4 centerView = modelView * vec4(modelCenter, 1.0);
+
+    // early out if splat is behind the camera
+    if (centerView.z > 0.0){// || centerView.z < -5.0) {
+        return false;
+    }
+
+    vec4 centerProj = matrix_projection * centerView;
+
+    // ensure gaussians are not clipped by camera near and far
+    centerProj.z = clamp(centerProj.z, -abs(centerProj.w), abs(centerProj.w));
+
+    center.view = centerView.xyz / centerView.w;
+    center.proj = centerProj;
+    center.projMat00 = matrix_projection[0][0];
+    center.modelView = modelView;
+    return true;
+}
+`;
 shaderChunks.skyboxPS = shaderChunks.skyboxPS.replace('mapRoughnessUv(uv, mipLevel)', 'uv');
 
 const v = new Vec3();
 const pose = new Pose();
+
+window.bblock = false;
 
 class Viewer {
     constructor(app, entity, events, state, settings) {
@@ -93,6 +124,7 @@ class Viewer {
         // apply camera animation settings
         entity.camera.clearColor = new Color(background.color);
         entity.camera.fov = camera.fov;
+        //entity.camera.farClip = 20;
 
         // handle horizontal fov on canvas resize
         const updateHorizontalFov = () => {
@@ -240,7 +272,7 @@ class Viewer {
         const resetPose = (() => {
             const { position, target } = this.settings.camera;
             return new Pose().fromLookAt(
-                new Vec3(position ?? [2, 1, 2]),
+                new Vec3(position ?? [0, 1, 0]),
                 new Vec3(target ?? [0, 0, 0])
             );
         })();
@@ -267,12 +299,12 @@ class Viewer {
         };
 
         // set fly speed based on scene size, within reason
-        flyCamera.moveSpeed = Math.max(0.05, Math.min(1, bbox.halfExtents.length() * 0.0001));
+        flyCamera.moveSpeed = 0.05;// Math.max(0.05, Math.min(1, bbox.halfExtents.length() * 0.0001));
 
         // set the global animation flag
         state.hasAnimation = !!animCamera;
         state.animationDuration = animCamera ? animCamera.cursor.duration : 0;
-        state.cameraMode = animCamera ? 'anim' : 'orbit';
+        state.cameraMode = animCamera ? 'anim' : 'fly';
 
         // this pose stores the current camera position. it will be blended/smoothed
         // toward the current active camera
@@ -288,19 +320,28 @@ class Viewer {
 
         // place all user cameras at the start position
         orbitCamera.reset(activePose);
+
+        const euler = new Vec3();
+        activePose.rotation.getEulerAngles(euler);
+        euler.x = 0; // <-- zero the pitch
+        euler.z = 0; // optional: zero the roll
+        activePose.rotation.setFromEulerAngles(euler.x, euler.y, euler.z);
+
         flyCamera.reset(activePose);
 
         // create the pointer device
         const pointerDevice = new PointerDevice(app.graphicsDevice.canvas);
         const controller = new AppController();
-
+        
+        window.controller = controller;
+        
         // transition time between cameras
         let transitionTimer = 0;
 
         // the previous camera we're transitioning away from
         const prevPose = new Pose();
         let prevCamera = null;
-        let prevCameraMode = 'orbit';
+        let prevCameraMode = 'fly';
 
         // update the currently active controller
         const assignController = () => {
@@ -381,18 +422,33 @@ class Viewer {
                 controller.left.value[2] += value[1];
             }
 
-            // update touch joystick UI
+            controller.touch.left.base = [window.innerWidth - 96, window.innerHeight - 96, 0];
+            controller.touch.right.base = [96, window.innerHeight - 96, 0];
+
+            /*
             const touchJoystick = controller.touch.left;
             if (touchJoystick.stick.every(v => v === 0)) {
-                events.fire('touchJoystickUpdate', null);
+                events.fire('touchJoystickUpdateLeft', null);
             } else {
-                events.fire('touchJoystickUpdate', touchJoystick.base, touchJoystick.stick);
+                events.fire('touchJoystickUpdateLeft', touchJoystick.base, touchJoystick.stick);
             }
+            */
+            
+            /*
+            const touchJoystickRight = controller.touch.right;
+            if (touchJoystickRight.stick.every(v => v === 0)) {
+                events.fire('touchJoystickUpdateRight', null);
+            } else {
+                events.fire('touchJoystickUpdateRight', touchJoystickRight.base, touchJoystickRight.stick);
+            }
+            */
 
             // update the active camera
             const input = {
                 move: controller.left,
-                rotate: controller.right
+                rotate: controller.right,
+                pinchActive: controller.touch?.pinchActive?.(),
+                isTouch: state.inputMode === 'touch'
             };
 
             // use dt of 0 if animation is paused
@@ -430,6 +486,8 @@ class Viewer {
             // apply to camera
             entity.setPosition(activePose.position);
             entity.setRotation(activePose.rotation);
+
+
         });
 
         // handle camera mode switching
@@ -478,6 +536,18 @@ class Viewer {
                     orbitCamera.reset(pose, false);
                 }
             }
+            if (state.cameraMode === 'fly' && eventName === 'click') {
+                if (!picker) {
+                    picker = new Picker(app, entity);
+                }
+                const result = await picker.pick(event.clientX, event.clientY);
+                
+                console.log(result);
+
+                if (result) {
+                    flyCamera.flyTo(result);
+                }
+            }            
         });
 
         // initialize the camera entity to initial position and kick off the
@@ -507,6 +577,7 @@ class Viewer {
             }
         });
     }
+
 }
 
 // displays a blurry poster image which resolves to sharp during loading
@@ -530,74 +601,73 @@ const initPoster = (url, events) => {
 // On entering/exiting AR, we need to set the camera clear color to transparent black
 const initXr = (app, cameraElement, state, events) => {
 
-    // initialize ar/vr
     state.hasAR = app.xr.isAvailable('immersive-ar');
     state.hasVR = app.xr.isAvailable('immersive-vr');
 
-    const parent = cameraElement.parentElement.entity;
-    const camera = cameraElement.entity;
-    const clearColor = new Color();
+    if (state.hasAR || state.hasVR) {
+        const parent = cameraElement.parentElement.entity;
+        const camera = cameraElement.entity;
+        const clearColor = new Color();
 
-    const parentPosition = new Vec3();
-    const parentRotation = new Quat();
-    const cameraPosition = new Vec3();
-    const cameraRotation = new Quat();
-    const angles = new Vec3();
+        const parentPosition = new Vec3();
+        const parentRotation = new Quat();
+        const cameraPosition = new Vec3();
+        const cameraRotation = new Quat();
 
-    parent.script.create(XrControllers);
-    parent.script.create(XrNavigation);
+        parent.script.create(XrControllers);
+        parent.script.create(XrNavigation);
 
-    app.xr.on('start', () => {
-        app.autoRender = true;
+        app.xr.on('start', () => {
+            app.autoRender = true;
 
-        // cache original camera rig positions and rotations
-        parentPosition.copy(parent.getPosition());
-        parentRotation.copy(parent.getRotation());
-        cameraPosition.copy(camera.getPosition());
-        cameraRotation.copy(camera.getRotation());
+            // cache original camera rig positions and rotations
+            parentPosition.copy(parent.getPosition());
+            parentRotation.copy(parent.getRotation());
+            cameraPosition.copy(camera.getPosition());
+            cameraRotation.copy(camera.getRotation());
 
-        cameraRotation.getEulerAngles(angles);
+            // copy transform to parent to XR/VR mode starts in the right place
+            parent.setPosition(cameraPosition.x, 0, cameraPosition.z);
+            parent.setRotation(cameraRotation);
 
-        // copy transform to parent to XR/VR mode starts in the right place
-        parent.setPosition(cameraPosition.x, 0, cameraPosition.z);
-        parent.setEulerAngles(0, angles.y, 0);
+            if (app.xr.type === 'immersive-ar') {
+                clearColor.copy(camera.camera.clearColor);
+                camera.camera.clearColor = new Color(0, 0, 0, 0);
+            }
+        });
 
-        if (app.xr.type === 'immersive-ar') {
-            clearColor.copy(camera.camera.clearColor);
-            camera.camera.clearColor = new Color(0, 0, 0, 0);
-        }
-    });
+        app.xr.on('end', () => {
+            app.autoRender = false;
 
-    app.xr.on('end', () => {
-        app.autoRender = false;
+            // restore camera to pre-XR state
+            parent.setPosition(parentPosition);
+            parent.setRotation(parentRotation);
+            camera.setPosition(cameraPosition);
+            camera.setRotation(cameraRotation);
 
-        // restore camera to pre-XR state
-        parent.setPosition(parentPosition);
-        parent.setRotation(parentRotation);
-        camera.setPosition(cameraPosition);
-        camera.setRotation(cameraRotation);
+            if (app.xr.type === 'immersive-ar') {
+                camera.camera.clearColor = clearColor;
+            }
+        });
 
-        if (app.xr.type === 'immersive-ar') {
-            camera.camera.clearColor = clearColor;
-        }
-    });
+        events.on('startAR', () => {
+            app.xr.start(app.root.findComponent('camera'), 'immersive-ar', 'local-floor');
+        });
 
-    events.on('startAR', () => {
-        app.xr.start(app.root.findComponent('camera'), 'immersive-ar', 'local-floor');
-    });
+        events.on('startVR', () => {
+            app.xr.start(app.root.findComponent('camera'), 'immersive-vr', 'local-floor');
+        });
 
-    events.on('startVR', () => {
-        app.xr.start(app.root.findComponent('camera'), 'immersive-vr', 'local-floor');
-    });
-
-    events.on('inputEvent', (event) => {
-        if (event === 'cancel' && app.xr.active) {
-            app.xr.end();
-        }
-    });
+        events.on('inputEvent', (event) => {
+            if (event === 'cancel' && app.xr.active) {
+                app.xr.end();
+            }
+        });
+    }
 };
 
-const loadContent = (app) => {
+const loadContent = (appElement) => {
+    const { app } = appElement;
     const { contentUrl } = window.sse;
 
     const asset = new Asset('scene.compressed.ply', 'gsplat', {
@@ -622,8 +692,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     const appElement = document.querySelector('pc-app');
     const app = (await appElement.ready()).app;
 
-    loadContent(app);
-
+    loadContent(appElement);
+    
     const cameraElement = await document.querySelector('pc-entity[name="camera"]').ready();
     const camera = cameraElement.entity;
     const settings = migrateSettings(await window.sse?.settings);
@@ -633,7 +703,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         hqMode: true,
         progress: 0,
         inputMode: 'desktop',       // desktop, touch
-        cameraMode: 'orbit',        // orbit, anim, fly
+        cameraMode: 'fly',        // orbit, anim, fly
         hasAnimation: false,
         animationDuration: 0,
         animationTime: 0,
@@ -644,17 +714,18 @@ document.addEventListener('DOMContentLoaded', async () => {
         uiVisible: true
     });
 
+
     // Initialize the load-time poster
     if (params.posterUrl) {
         initPoster(params.posterUrl, events);
     }
 
     // Initialize skybox
-    if (params.skyboxUrl) {
+    if (0 && settings.skybox!=null) {
         const skyAsset = new Asset('skybox', 'texture', {
-            url: params.skyboxUrl
+            url: settings.skybox
         }, {
-            type: 'rgbp',
+            type: 'hdri',
             mipmaps: false,
             addressu: 'repeat',
             addressv: 'clamp'
@@ -667,6 +738,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         app.assets.add(skyAsset);
         app.assets.load(skyAsset);
     }
+
+    
+    loadBoxGLB(app, settings);
+    
 
     // construct ministats
     if (params.ministats) {
@@ -711,16 +786,33 @@ document.addEventListener('DOMContentLoaded', async () => {
         'settings', 'settingsPanel',
         'fly', 'orbit', 'cameraToggleHighlight',
         'high', 'low', 'qualityToggleHighlight',
+        'lock', 'unlock', 'bboxToggleHighlight',
         'reset', 'frame',
         'loadingText', 'loadingBar',
-        'joystickBase', 'joystick'
+        'joystickBase', 'joystick',
+        'joystickBaseRight', 'joystickRight'
     ].reduce((acc, id) => {
         acc[id] = document.getElementById(id);
         return acc;
     }, {});
 
+    dom.bboxToggleHighlight.classList['add']('right');
+
+    // Set default visible position
+    dom.joystickBase.style.left = `${window.innerWidth - 96}px`;
+    dom.joystickBase.style.top =`${window.innerHeight - 96}px` ;
+    dom.joystick.style.left = '48px';
+    dom.joystick.style.top = '48px';
+
+    dom.joystickBaseRight.style.left = '96px';
+    dom.joystickBaseRight.style.top = `${window.innerHeight - 96}px`;
+    dom.joystickRight.style.left = '48px';
+    dom.joystickRight.style.top = '48px';
+
     // Handle loading progress updates
     events.on('progress:changed', (progress) => {
+        console.log(progress);
+
         dom.loadingText.textContent = `${progress}%`;
         if (progress < 100) {
             dom.loadingBar.style.backgroundImage = `linear-gradient(90deg, #F60 0%, #F60 ${progress}%, white ${progress}%, white 100%)`;
@@ -797,18 +889,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
     updateHQ();
 
-    // AR/VR
-    const updateAR = () => dom.arMode.classList[state.hasAR ? 'remove' : 'add']('hidden');
-    const updateVR = () => dom.vrMode.classList[state.hasVR ? 'remove' : 'add']('hidden');
+    // AR
+    if (state.hasAR) {
+        dom.arMode.classList.remove('hidden');
+        dom.arMode.addEventListener('click', () => events.fire('startAR'));
+    }
 
-    events.on('hasAR:changed', updateAR);
-    events.on('hasVR:changed', updateVR);
-
-    dom.arMode.addEventListener('click', () => events.fire('startAR'));
-    dom.vrMode.addEventListener('click', () => events.fire('startVR'));
-
-    updateAR();
-    updateVR();
+    // VR
+    if (state.hasVR) {
+        dom.vrMode.classList.remove('hidden');
+        dom.vrMode.addEventListener('click', () => events.fire('startVR'));
+    }
 
     // Info panel
     const updateInfoTab = (tab) => {
@@ -986,6 +1077,16 @@ document.addEventListener('DOMContentLoaded', async () => {
         state.cameraMode = 'orbit';
     });
 
+    dom.lock.addEventListener('click', () => {
+        window.bblock = true;
+        dom.bboxToggleHighlight.classList['remove']('right');
+    });
+
+    dom.unlock.addEventListener('click', () => {
+        window.bblock = false;
+        dom.bboxToggleHighlight.classList['add']('right');
+    });    
+
     dom.reset.addEventListener('click', (event) => {
         events.fire('inputEvent', 'reset', event);
     });
@@ -994,23 +1095,47 @@ document.addEventListener('DOMContentLoaded', async () => {
         events.fire('inputEvent', 'frame', event);
     });
 
-    // update UI based on touch joystick updates
-    events.on('touchJoystickUpdate', (base, stick) => {
-        if (base === null) {
-            dom.joystickBase.classList.add('hidden');
-        } else {
-            v.set(stick[0], stick[1], 0).mulScalar(1 / 48);
-            if (v.length() > 1) {
-                v.normalize();
-            }
-            v.mulScalar(48);
+    events.on('touchJoystickUpdateLeft', (base, stick) => {
+        // Remove hiding logic
+         if (base === null) {
+             dom.joystickBase.classList.add('hidden');
+         } else {
 
-            dom.joystickBase.classList.remove('hidden');
-            dom.joystickBase.style.left = `${base[0]}px`;
-            dom.joystickBase.style.top = `${base[1]}px`;
+            const baseX = window.innerWidth - 96;
+            const baseY = window.innerHeight - 96;
+    
+            v.set(stick[0], stick[1], 0).mulScalar(1 / 48);
+            if (v.length() > 1) v.normalize();
+            v.mulScalar(48);    
+            // Always show and position left joystick
+             dom.joystickBase.classList.remove('hidden');
+            dom.joystickBase.style.left = `${baseX}px`;
+            dom.joystickBase.style.top = `${baseY}px`;
             dom.joystick.style.left = `${48 + v.x}px`;
             dom.joystick.style.top = `${48 + v.y}px`;
+
+            console.log(dom.joystick.style.left,dom.joystick.style.top);
         }
+    });
+    
+    events.on('touchJoystickUpdateRight', (base, stick) => {
+        // Remove hiding logic
+         if (base === null) {
+             dom.joystickBaseRight.classList.add('hidden');
+        } else {
+            const baseX = 96;
+            const baseY = window.innerHeight - 96;
+
+            v.set(stick[0], stick[1], 0).mulScalar(1 / 48);
+            if (v.length() > 1) v.normalize();
+            v.mulScalar(48);    
+            // Always show and position right joystick
+             dom.joystickBaseRight.classList.remove('hidden');
+            dom.joystickBaseRight.style.left = `${baseX}px`;
+            dom.joystickBaseRight.style.top = `${baseY}px`;
+            dom.joystickRight.style.left = `${48 + v.x}px`;
+            dom.joystickRight.style.top = `${48 + v.y}px`;
+         }
     });
 
     // Hide UI
@@ -1045,7 +1170,26 @@ document.addEventListener('DOMContentLoaded', async () => {
             lastTap.x = event.clientX;
             lastTap.y = event.clientY;
         }
+
     });
+
+
+
+    app.graphicsDevice.canvas.addEventListener('pointerup', (event) => {
+        const curTap = new Date().getTime();
+        const delay = Math.max(0, curTap - lastTap.time);
+    
+        const dx = event.clientX - lastTap.x;
+        const dy = event.clientY - lastTap.y;
+        const distanceSq = dx * dx + dy * dy;
+    
+        const maxDistanceSq = 8 * 8; // allow 8 pixels of wiggle
+    
+        if (delay < 150 && distanceSq < maxDistanceSq) {
+            events.fire('inputEvent', 'click', event);
+        }
+    });
+    
 
     // update input mode based on pointer event
     ['pointerdown', 'pointermove'].forEach((eventName) => {
@@ -1072,3 +1216,26 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     });
 });
+
+const loadBoxGLB = (app,settings) => {
+
+    const asset = new Asset('boundingBox', 'model', {
+        url: settings.box_url
+    });
+
+    asset.on('load', () => {
+        const entity = new Entity('BoundingBox');
+        entity.addComponent('model', {
+            type: 'asset',
+            asset: asset
+        });
+        app.root.addChild(entity);
+        window.boundsMeshInstance = asset.resource.meshInstances[0];
+
+
+    });
+
+    app.assets.add(asset);
+    app.assets.load(asset);
+};
+

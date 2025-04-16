@@ -9,7 +9,7 @@
         <script type="module">
             const url = new URL(location.href);
             const settingsUrl = url.searchParams.has('settings') ? url.searchParams.get('settings') : './settings.json';
-            const contentUrl = url.searchParams.has('content') ? url.searchParams.get('content') : './scene.compressed.ply';
+            const contentUrl = url.searchParams.has('content') ? url.searchParams.get('content') : './point_cloud_3.compressed.ply';
             window.sse = {
                 settings: fetch(settingsUrl).then(response => response.json()),
                 contentUrl,
@@ -92,7 +92,7 @@
             <div id="settingsPanel" class="hidden">
                 <div>Camera Mode</div>
                 <div id="cameraToggle" class="toggleWrap">
-                    <div id="cameraToggleHighlight" class="toggleHighlight"></div>
+                    <div id="cameraToggleHighlight" class="toggleHighlight right"></div>
                     <button id="orbit" class="left">Orbit</button>
                     <button id="fly" class="right">Fly</button>
                 </div>
@@ -107,6 +107,12 @@
                     <button id="frame" class="button">Frame</button>
                     <button id="reset" class="button">Reset</button>
                 </div>
+                <div>BBox</div>
+                <div id="bboxToggle" class="toggleWrap">
+                    <div id="bboxToggleHighlight" class="toggleHighlight right"></div>
+                    <button id="lock" class="left">Lock</button>
+                    <button id="unlock" class="right">Free</button>
+                </div>                
             </div>
 
             <!-- Info Panel -->
@@ -195,6 +201,9 @@
             <div id="joystickBase" class="hidden">
                 <div id="joystick"></div>
             </div>
+            <div id="joystickBaseRight" class="hidden">
+                <div id="joystickRight"></div>
+            </div>            
         </div>
     </body>
 </html>
